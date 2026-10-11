@@ -1,6 +1,6 @@
 diff --git a/evidence/reproduction-results.txt b/evidence/reproduction-results.txt
 new file mode 100644
-index 0000000..16861a8
+index 0000000..a3d29eb
 --- /dev/null
 +++ b/evidence/reproduction-results.txt
 @@ -0,0 +1,9 @@
@@ -8,21 +8,21 @@ index 0000000..16861a8
 +syntax_compile: passed
 +dependency_api: argos-translate-files 1.4.4 translate_file supports get_output_path
 +legacy_download: legacy_file_exists=true reserve_download=FileNotAvailable
-+cleanup_failure: discard_returned_normally=true job_dir_remains=true input_remains=true candidate_remains=true
++cleanup_failure: discard_exception=OSError job_dir_remains=true input_remains=true candidate_remains=true
 +active_download_expiry: sweep_ran=true public_exists=false job_exists=false reserved_path_exists=false
 +reaper_lock_expiry: first_acquired=true second_acquired_before_first_release=true owner_changed_to_second=true
 +owner_write_failure: acquired_token=true owner_file_exists=false lock_dir_after_release=true takeover_token=None
 +publish_state_failure_cleanup: public_exists=false job_exists=false
 diff --git a/evidence/rubric-comparison.txt b/evidence/rubric-comparison.txt
 new file mode 100644
-index 0000000..53d611c
+index 0000000..d34234f
 --- /dev/null
 +++ b/evidence/rubric-comparison.txt
 @@ -0,0 +1,9 @@
 +项目：libretranslate-libretranslate-d12ff408-289d-41c3-bfac-3c9355990f1c｜结论：部分完成｜有效轮数：70｜Harness：Trae｜收录：难题
 +Rubric ID：1｜状态：未通过｜期望行为：未启用文件翻译、普通短任务、自动检测、支持格式、字符限额计费和成功下载的现有外部行为保持兼容。｜实际观察：升级前已发布且位于上传目录顶层的 UUID 结果没有 .jobs 状态目录时，reserve_download 在目录检查处抛出 FileNotAvailable，文件仍在磁盘但下载路由返回 404。｜直接证据：兼容验证创建顶层 UUID 结果后得到 legacy_file_exists=true、reserve_download=FileNotAvailable；实现要求 .jobs/<uuid> 必须存在。｜原因：升级前已发布但没有 .jobs 状态的 UUID 结果被 reserve_download 拒绝｜影响：升级时仍在保留期内的成功翻译结果无法继续下载。｜证据位置：evidence/reproduction-results.txt 的 legacy_download；libretranslate/file_jobs.py:395-423；libretranslate/app.py:1065-1073
 +Rubric ID：2｜状态：通过｜期望行为：复用现有 UUID 产物身份时，上传输入和候选输出在完整翻译成功前不会作为可下载结果暴露，成功发布后 URL 只对应完整文件。｜实际观察：候选输出写在 .jobs/<uuid>/candidate 私有路径，publish 仅接受该候选并用 os.replace 移到公开文件名，状态必须为 ready 且 public_name 匹配才能建立下载租约。｜直接证据：libretranslate/file_jobs.py:101-118、320-359、395-448；隔离测试 test_file_jobs.py 共 21 项通过；argos-translate-files 1.4.4 的 translate_file 接受 get_output_path 参数。
-+Rubric ID：3｜状态：未通过｜期望行为：翻译失败、检测失败或请求取消时，本次未发布的输入与候选输出被清理，不会留下可下载半成品或永久孤儿文件。｜实际观察：强制 os.remove 和 shutil.rmtree 抛出 OSError 后，discard 正常返回，作业目录、输入和候选输出全部仍然存在。｜直接证据：清理失败验证得到 discard_returned_normally=true、job_dir_remains=true、input_remains=true、candidate_remains=true；实现吞掉删除异常。｜原因：文件删除失败时 discard 正常返回且输入、候选输出和作业目录仍然存在｜影响：失败或取消请求留下永久孤儿文件，并向调用路由隐藏清理失败。｜证据位置：evidence/reproduction-results.txt 的 cleanup_failure；libretranslate/file_jobs.py:364-383、497-515
++Rubric ID：3｜状态：未通过｜期望行为：翻译失败、检测失败或请求取消时，本次未发布的输入与候选输出被清理，不会留下可下载半成品或永久孤儿文件。｜实际观察：强制 os.remove 和 shutil.rmtree 抛出 OSError 后，discard 抛出 OSError，作业目录、输入和候选输出全部仍然存在。｜直接证据：清理失败验证得到 discard_exception=OSError、job_dir_remains=true、input_remains=true、candidate_remains=true；异常路径再次调用 shutil.rmtree 后错误向上传播。｜原因：文件删除失败时 discard 抛出 OSError 且输入、候选输出和作业目录仍然存在｜影响：失败或取消请求的异常处理再次失败，并留下未发布输入、候选输出和作业目录。｜证据位置：evidence/reproduction-results.txt 的 cleanup_failure；libretranslate/file_jobs.py:364-383、497-515
 +Rubric ID：4｜状态：未通过｜期望行为：清理扫描与长时间翻译或正在进行的下载并发时不会删除活跃文件，下载只会得到完整结果或稳定的过期与不存在错误。｜实际观察：下载 context 保持活动时将静态 marker 年龄推进到 DOWNLOAD_STALE 之后执行 sweep，公开文件和作业目录均被删除，context 内保留的路径也不再存在。｜直接证据：长下载验证得到 sweep_ran=true、public_exists=false、job_exists=false、reserved_path_exists=false；下载 marker 只在创建时写入且没有续租。｜原因：下载持续超过静态租约时 sweep 删除正在读取的公开文件和作业目录｜影响：长时间下载在活动期间失去结果文件，无法保证只返回完整结果。｜证据位置：evidence/reproduction-results.txt 的 active_download_expiry；libretranslate/file_jobs.py:395-480、539-613
 +Rubric ID：5｜状态：未通过｜期望行为：产物过期后多个 worker 同时扫描时只有一个回收者完成状态转换和删除，重复扫描不会报错、重复发布或留下不一致记录。｜实际观察：第一个回收者尚未释放全局锁时，将 owner mtime 推进超过 GC_LOCK_STALE 后，第二个 worker 成功取得锁且 owner 切换为第二个 token。｜直接证据：长回收验证得到 first_acquired=true、second_acquired_before_first_release=true、owner_changed_to_second=true；全局回收锁没有续租。｜原因：回收持续超过静态锁超时时第二个 worker 在首个回收者未释放时取得回收锁｜影响：两个回收者可同时扫描和删除同一共享目录，单回收者约束失效。｜证据位置：evidence/reproduction-results.txt 的 reaper_lock_expiry；libretranslate/file_jobs.py:151-198、636-651
 +Rubric ID：6｜状态：未通过｜期望行为：worker 在翻译、发布、下载或回收阶段退出后，重启的 worker 能按状态接管清理或继续提供已发布结果，不会永久保留活动租约。｜实际观察：强制 owner 文件写入失败后，_try_mkdir_lock 返回成功 token，但锁目录没有 owner；释放操作不删除该锁，后续 worker 因 _read_owner 返回 None 而拒绝接管。｜直接证据：owner 写入失败验证得到 acquired_token=true、owner_file_exists=false、lock_dir_after_release=true、takeover_token=None；_write_owner 吞掉 OSError。｜原因：回收锁 owner 写入失败后锁目录永久保留且后续 worker 无法接管｜影响：回收调度被永久阻断，过期产物和陈旧状态无法由重启 worker 收敛。｜证据位置：evidence/reproduction-results.txt 的 owner_write_failure；libretranslate/file_jobs.py:135-188、191-198
@@ -30,75 +30,81 @@ index 0000000..53d611c
 +关键验证摘要：PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 的隔离 file_jobs 测试为 21 passed；变更 Python 文件语法编译通过；发布状态写入失败后 discard 删除公开文件和作业目录；完整依赖环境因镜像下载 NumPy 停滞而中止，该环境事件未作为 Rubric 失败依据。
 diff --git a/evidence/screenshots/01-rubric-comparison.png b/evidence/screenshots/01-rubric-comparison.png
 new file mode 100644
-index 0000000000000000000000000000000000000000..c67b1642f60176e1089d314ce3feb852a72a5fda
+index 0000000000000000000000000000000000000000..a8913a71d9270552c820e64c83185e66396f6063
 GIT binary patch
-literal 12729
-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
-OhJzvD`<uRwzwlq>fn5Rs
+literal 13042
+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
+Y{@}4yHV3hN0}MWLFz5j7+o+5G2lg}wDF6Tf
 
 literal 0
 HcmV?d00001
