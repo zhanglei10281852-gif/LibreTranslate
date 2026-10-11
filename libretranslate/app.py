@@ -3,7 +3,6 @@ import math
 import os
 import re
 import tempfile
-import uuid
 import sys
 import warnings
 from datetime import datetime
@@ -22,7 +21,7 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.http import http_date
 from werkzeug.utils import secure_filename
 
-from libretranslate import flood, remove_translated_files, scheduler, secret, security, storage, cache
+from libretranslate import file_jobs, flood, remove_translated_files, scheduler, secret, security, storage, cache
 from libretranslate.language import model2iso, iso2model, detect_languages, improve_translation_formatting, get_language_with_fallback
 from libretranslate.locales import (
     _,
@@ -422,6 +421,10 @@ def create_app(args):
     @bp.errorhandler(400)
     def invalid_api(e):
         return jsonify({"error": str(e.description)}), 400
+
+    @bp.errorhandler(404)
+    def not_found(e):
+        return jsonify({"error": str(e.description)}), 404
 
     @bp.errorhandler(500)
     def server_error(e):
@@ -993,11 +996,18 @@ def create_app(args):
         if tgt_lang is None:
             abort(400, description=_("%(lang)s is not supported", lang=target_lang))
 
+        job = None
         try:
-            filename = str(uuid.uuid4()) + '.' + secure_filename(file.filename)
-            filepath = os.path.join(get_upload_dir(), filename)
+            # The UUID is the job identity for the whole lifecycle; the
+            # public result keeps the same "<uuid>.<name>_<target><ext>"
+            # naming as before once it is published.
+            safe_name = secure_filename(file.filename)
+            ext = os.path.splitext(safe_name)[1]
+            job = file_jobs.create_job(
+                get_upload_dir(), safe_name, source_lang, target_lang, ext
+            )
 
-            file.save(filepath)
+            file.save(job.input_path)
 
             # Not an exact science: take the number of bytes and divide by
             # the character limit. Assuming a plain text file, this will
@@ -1005,25 +1015,36 @@ def create_app(args):
             # roughly equivalent to a batch process of N batches assuming
             # each batch uses all available limits
             if char_limit > 0:
-                request.req_cost = max(1, int(os.path.getsize(filepath) / char_limit))
+                request.req_cost = max(1, int(os.path.getsize(job.input_path) / char_limit))
 
             if source_lang == "auto":
-                src_texts = argostranslatefiles.get_texts(filepath)
+                src_texts = argostranslatefiles.get_texts(job.input_path)
                 candidate_langs = detect_languages(src_texts)
                 detected_src_lang = candidate_langs[0]
                 src_lang = get_language_with_fallback(detected_src_lang["language"], languages)
                 if src_lang is None:
                     abort(400, description=_("%(lang)s is not supported", lang=detected_src_lang["language"]))
 
-            translated_file_path = argostranslatefiles.translate_file(src_lang.get_translation(tgt_lang), filepath)
-            translated_filename = os.path.basename(translated_file_path)
+            # Candidate output is written under a private, non-downloadable
+            # path; the result only gets its public name after publish().
+            file_jobs.begin_translation(job)
+            translated_file_path = argostranslatefiles.translate_file(
+                src_lang.get_translation(tgt_lang),
+                job.input_path,
+                get_output_path=file_jobs.candidate_output_path(job),
+            )
+            public_filename = file_jobs.publish(job, translated_file_path)
 
             return jsonify(
                 {
-                    "translatedFileUrl": url_for('Main app.download_file', filename=translated_filename, _external=True)
+                    "translatedFileUrl": url_for('Main app.download_file', filename=public_filename, _external=True)
                 }
             )
         except Exception as e:
+            # Failure or client cancellation: drop every unpublished artifact
+            # of this request instead of leaving inputs/half files behind.
+            if job is not None:
+                file_jobs.discard(job)
             abort(500, description=e)
 
     @bp.get("/download_file/<string:filename>")
@@ -1034,17 +1055,23 @@ def create_app(args):
         if args.disable_files_translation:
             abort(400, description=_("Files translation are disabled on this server."))
 
-        filepath = os.path.join(get_upload_dir(), filename)
+        upload_dir = get_upload_dir()
+        filepath = os.path.join(upload_dir, filename)
         try:
-            checked_filepath = security.path_traversal_check(filepath, get_upload_dir())
-            if os.path.isfile(checked_filepath):
-                filepath = checked_filepath
+            security.path_traversal_check(filepath, upload_dir)
         except security.SuspiciousFileOperationError:
             abort(400, description=_("Invalid filename"))
 
-        return_data = io.BytesIO()
-        with open(filepath, 'rb') as fo:
-            return_data.write(fo.read())
+        # Only published, non-expired products can be read; the reservation
+        # marker keeps the reaper from deleting the file while we stream it.
+        try:
+            with file_jobs.reserve_download(upload_dir, filename) as filepath:
+                return_data = io.BytesIO()
+                with open(filepath, 'rb') as fo:
+                    return_data.write(fo.read())
+        except file_jobs.FileNotAvailable:
+            abort(404, description=_("File not found, expired or not yet available"))
+
         return_data.seek(0)
 
         download_filename = filename.split('.')
