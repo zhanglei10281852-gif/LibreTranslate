@@ -2,7 +2,7 @@ isolated_tests: 21 passed
 syntax_compile: passed
 dependency_api: argos-translate-files 1.4.4 translate_file supports get_output_path
 legacy_download: legacy_file_exists=true reserve_download=FileNotAvailable
-cleanup_failure: discard_returned_normally=true job_dir_remains=true input_remains=true candidate_remains=true
+cleanup_failure: discard_exception=OSError job_dir_remains=true input_remains=true candidate_remains=true
 active_download_expiry: sweep_ran=true public_exists=false job_exists=false reserved_path_exists=false
 reaper_lock_expiry: first_acquired=true second_acquired_before_first_release=true owner_changed_to_second=true
 owner_write_failure: acquired_token=true owner_file_exists=false lock_dir_after_release=true takeover_token=None
